@@ -1,0 +1,28 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/stefanprodan/podinfo
+  tag: "6.7.1"
+  pullPolicy: IfNotPresent
+
+containerPort: 9898
+
+service:
+  # ClusterIP keeps the lab free of load balancer cost. Use "kubectl port-forward" to test,
+  # or set type: LoadBalancer to get an AWS Network Load Balancer.
+  type: ClusterIP
+  port: 80
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70

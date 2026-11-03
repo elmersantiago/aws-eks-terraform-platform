@@ -1,0 +1,6 @@
+apiVersion: v2
+name: web-app
+description: Sample web service deployed to EKS with security and reliability defaults.
+type: application
+version: 0.1.0
+appVersion: "6.7.1"
