@@ -1,0 +1,88 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "plan, apply (infra + app), or destroy"
+        required: true
+        default: plan
+        type: choice
+        options: [plan, apply, destroy]
+
+permissions:
+  id-token: write # GitHub OIDC token, exchanged for short-lived AWS credentials
+  contents: read
+
+concurrency:
+  group: eks-platform-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  deploy:
+    name: ${{ inputs.action }}
+    runs-on: ubuntu-latest
+    environment: aws
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC, no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      # The public EKS API only accepts your CIDR. The hosted runner's IP changes on
+      # every run, so it is added for this run. Production would use self-hosted
+      # runners inside the VPC and a private-only endpoint instead.
+      - name: Build API allow-list
+        run: |
+          RUNNER_IP=$(curl -s https://checkip.amazonaws.com)
+          echo "TF_VAR_api_allowed_cidrs=[\"${{ vars.API_ALLOWED_CIDR }}\",\"${RUNNER_IP}/32\"]" >> "$GITHUB_ENV"
+          echo "TF_VAR_admin_principal_arns=${{ vars.ADMIN_PRINCIPAL_ARNS || '[]' }}" >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        run: terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      - name: Terraform plan
+        if: inputs.action != 'destroy'
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Terraform apply
+        if: inputs.action == 'apply'
+        run: terraform apply -input=false tfplan
+
+      - uses: azure/setup-helm@v4
+        if: inputs.action == 'apply'
+
+      - name: Deploy metrics-server and web-app
+        if: inputs.action == 'apply'
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$(terraform output -raw cluster_name)"
+          helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+          helm upgrade --install metrics-server metrics-server/metrics-server -n kube-system --wait
+          helm upgrade --install web-app ../charts/web-app -n web --create-namespace --wait --timeout 5m
+
+      - name: Smoke test
+        if: inputs.action == 'apply'
+        run: |
+          kubectl -n web rollout status deployment/web-app --timeout=120s
+          kubectl -n web get pods,svc,hpa -o wide
+          kubectl -n web port-forward svc/web-app 8080:80 >/dev/null 2>&1 &
+          sleep 5
+          curl -fsS http://localhost:8080/healthz && echo " - health check passed"
+
+      - name: Terraform destroy
+        if: inputs.action == 'destroy'
+        run: terraform destroy -input=false -auto-approve
